@@ -42,7 +42,7 @@ func inkBand(img *image.RGBA) (minY, maxY int, ok bool) {
 // extent 中心对齐锚点，墨迹带中心与锚点像素坐标偏差应远小于半个字高
 // （修复前基线被抬到锚点上方 0.35h 再向上出墨，整体偏高 ~0.7 字高）。
 func TestTextMiddleAlignExtentCenter(t *testing.T) {
-	requireRenderFont(t)
+	requireCJKFont(t)
 	const W, h, em = 320, 160, 48.0
 	draw := func(vAlign uint16) *image.RGBA {
 		img := image.NewRGBA(image.Rect(0, 0, W, h))
@@ -82,7 +82,7 @@ func TestTextMiddleAlignExtentCenter(t *testing.T) {
 // 旧 blitGlyph 口径 Cv=asc−dy 多计一段上延，全部文字整体抬高 ~1em
 // （vAlign=0 实测墨带整体悬于基线上方 ~0.96em，红色注释错位实证）。
 func TestTextBaselineAnchoring(t *testing.T) {
-	requireRenderFont(t)
+	requireCJKFont(t)
 	const W, h, em = 320, 240, 48.0
 	img := image.NewRGBA(image.Rect(0, 0, W, h))
 	drawRect(img, img.Rect, color.RGBA{255, 255, 255, 255})
@@ -107,7 +107,7 @@ func TestTextBaselineAnchoring(t *testing.T) {
 // 墨带间距 ≈0.9×字高（世界=像素 1:1 版式），而非 1.66×0.9；factor 缺省
 // 回退 1.66 历史口径。
 func TestMTextLineAdvanceFactor(t *testing.T) {
-	requireRenderFont(t)
+	requireCJKFont(t)
 	const em = 20.0
 	draw := func(lineFactor float64) *image.RGBA {
 		img := image.NewRGBA(image.Rect(0, 0, 600, 300))

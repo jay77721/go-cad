@@ -83,6 +83,9 @@ func SheetTexts(doc *Document) []SheetText {
 // SanitizeSheetName 规范化图纸名（文件名安全口径）。
 func SanitizeSheetName(name string) string { return render.SanitizeSheetName(name) }
 
+// SheetViewport 返回图框 Box 对应的世界坐标视口（含渲染边距）。
+func SheetViewport(b [4]float64) [4]float64 { return render.SheetViewport(b) }
+
 // WriteDwg 按文档携带的容器素材写出 DWG（R2000/R2004/R2007 家族自适应）。
 func WriteDwg(doc *Document, w io.Writer) error { return writer.WriteDwg(doc, w) }
 

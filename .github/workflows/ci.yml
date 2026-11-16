@@ -13,6 +13,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-wqy-zenhei fonts-droid-fallback fonts-unifont
       - name: gofmt check
         run: |
           test -z "$(gofmt -l . )" || { gofmt -l .; exit 1; }

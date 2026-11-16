@@ -162,8 +162,8 @@ func (st *DxfState) skipToEndSec() error {
 // ---- HEADER 段 ----
 
 // parseHeader 头部变量：$ACADVER（版本枚举）与 $DWGCODEPAGE（码页），
-// 其余键从略。读到码页后，pre-R13（R12 及更早）的 DXF 文本按该码页
-// 解码（复用 DWG 侧 decodeCodepage，GBK 等；R13+ 文本保持字节直读）。
+// 其余键从略。R13–R2004 的 DXF 文本按声明码页解码；R2007+ 按 UTF-8
+// 直读（$DWGCODEPAGE 仍可能写着 ANSI_1252，但不能二次解码）。
 func (st *DxfState) parseHeader() error {
 	for {
 		p, ok, err := st.lexer.next()
@@ -171,10 +171,12 @@ func (st *DxfState) parseHeader() error {
 			return err
 		}
 		if !ok {
+			st.applyCodepage()
 			return nil
 		}
 		if p.Code == 0 {
 			if p.strValue() == "ENDSEC" {
+				st.applyCodepage()
 				return nil
 			}
 			continue
@@ -207,11 +209,14 @@ func (st *DxfState) parseHeader() error {
 	}
 }
 
-// applyCodepage HEADER 键就绪后同步词法层码页：仅 pre-R13（R12 系）
-// 应用——R13+ 的 DXF 文本不走码页；未知码页（0）显式禁用（字节直读）。
+// applyCodepage 头部键就绪后同步词法层码页：pre-R13（R12 系）与
+// R13–R2004 的 DXF 文本按声明码页解码；R2007+ 是 UTF-8，显式关闭
+// 码页（未知码页 0 同样保持字节直读）。
 func (st *DxfState) applyCodepage() {
-	if st.Doc.Ver.PreR13() {
+	if st.Doc.Ver.PreR13() || st.Doc.Ver <= container.VerR2004 {
 		st.lexer.cp = st.Doc.Codepage
+	} else {
+		st.lexer.cp = 0
 	}
 }
 
@@ -715,11 +720,12 @@ func (st *DxfState) dxfBase(rec *DxfRec, mode uint8, owner uint64) *entity.BaseE
 		}
 	}
 	return &entity.BaseEntity{
-		Handle: st.RecordHandle(rec),
-		Color:  dxfEntityColor(rec),
-		Layer:  st.layerHandle(rec.str(8)),
-		Owner:  owner,
-		Mode:   mode,
+		Handle:   st.RecordHandle(rec),
+		Color:    dxfEntityColor(rec),
+		Layer:    st.layerHandle(rec.str(8)),
+		Owner:    owner,
+		Mode:     mode,
+		TypeName: rec.Typ,
 	}
 }
 
@@ -1192,13 +1198,37 @@ func dxfDegToRad(deg float64) float64 { return deg * math.Pi / 180 }
 // 10 恒为 def 点（gold ex2000 h=43B 仲裁）；ORDINATE 的 13/14 为
 // feature_location/leader_end（直接载入 point13/14，与 JSON 侧同口径）。
 // DIMENSION 走显式组码字段，无 dimSpecificLayout 位流布局问题；
-// dimstyle 名（组码 3）与匿名块名（组码 2）无句柄对应，不恢复句柄引用。
+// dimstyle 名（组码 3）无句柄对应；匿名块名（组码 2）按 BLOCKS 段名字表
+// 解析为句柄，交由渲染展开匿名块，避免退化成测量点连线。
 func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 	d := &entity.EntDimension{BaseEntity: *base}
+	if name := rec.str(2); name != "" {
+		if h, ok := st.BlockByName[name]; ok {
+			d.AnonymousBlock = h
+		}
+	}
 	flag, _ := rec.intVal(70)
 	d.DimFlag = uint8(flag & 0xFF)
 	d.DimFlags = d.DimFlag // DXF 无独立 flag1 位流，审计口径以 flag 为准
 	sub := d.DimFlag & 0x7
+	// 与 DWG 解码共用内部短名：DimGoldEntityName 再把 DIM_* 映射成
+	// DIMENSION_* 的 gold 键；写出端的类型码表同样使用 DIM_*。
+	switch sub {
+	case 0:
+		d.TypeName = "DIM_LINEAR"
+	case 1:
+		d.TypeName = "DIM_ALIGNED"
+	case 2:
+		d.TypeName = "DIM_ANG2LN"
+	case 3:
+		d.TypeName = "DIM_DIAMETER"
+	case 4:
+		d.TypeName = "DIM_RADIUS"
+	case 5:
+		d.TypeName = "DIM_ANG3PT"
+	case 6:
+		d.TypeName = "DIM_ORDINATE"
+	}
 	// 公共段
 	// 10 组码恒为 def 点（DWG 侧 point10 载体，含 ANG2LN——gold 仲裁：
 	// ex2000 h=43B 的 DXF 10 与 gold xline2end_pt 一致，16 与 def_pt 一致）

@@ -913,10 +913,10 @@ func TestSheetTextPassRate(t *testing.T) {
 	if math.Abs(rate-2.0/3.0) > 1e-9 {
 		t.Fatalf("达标率应 2/3，实际 %v", rate)
 	}
-	// 视口外文本不计入
+	// 文档有文本但全在视口外：不算达标（否则错误视口会被当成 100% 清晰度）
 	rate = sheetTextPassRate(prims, drawing.Box2{MinX: 50, MinY: 50, MaxX: 100, MaxY: 100}, 2)
-	if rate != 1 {
-		t.Fatalf("视口外文本应不计入（无文本=达标），实际 %v", rate)
+	if rate != 0 {
+		t.Fatalf("视口外文本应不达标 0，实际 %v", rate)
 	}
 	// 无文本图框视为达标
 	rate = sheetTextPassRate(nil, drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}, 1)

@@ -40,6 +40,18 @@ func requireRenderFont(t *testing.T) {
 	}
 }
 
+// requireCJKFont 在只有西文字体的 CI 环境跳过 CJK 字形用例：DejaVu 能
+// 让 requireRenderFont 通过，但没有中文字形，断言会以“无墨迹/缺字”失败。
+func requireCJKFont(t *testing.T) {
+	t.Helper()
+	requireRenderFont(t)
+	tr := newTextRenderer(&canvas{})
+	sf := tr.faceFor(32)
+	if g := tr.glyph('中', sf); g == nil || g.mask == nil {
+		t.Skip("无 CJK 系统字体（wqy/droid/noto 均缺失），跳过 CJK 字形用例")
+	}
+}
+
 // TestAdaptiveLineWidth 默认线宽随渲染宽度自适应（2048 保持历史口径）。
 func TestAdaptiveLineWidth(t *testing.T) {
 	cases := []struct {
@@ -71,7 +83,7 @@ func TestParseFontFileMissing(t *testing.T) {
 // TestGlyphRasterizeAndCache 字形光栅化与 (rune,档位) 缓存命中一致性；
 // 空格无笔画、控制字符直接跳过。
 func TestGlyphRasterizeAndCache(t *testing.T) {
-	requireRenderFont(t)
+	requireCJKFont(t)
 	tr := newTextRenderer(&canvas{})
 	sf := tr.faceFor(32)
 	g1 := tr.glyph('中', sf)

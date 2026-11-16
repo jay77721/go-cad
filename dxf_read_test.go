@@ -2510,7 +2510,8 @@ func TestParseDXFSeqendOwnership(t *testing.T) {
 
 // TestParseDXFR12CodepageGBK R12 系 DXF 的文本按 $DWGCODEPAGE 解码：
 // GBK 字节的 TEXT 值（"中文" = D6D0 CEC4）+ ANSI_936 → 解出 UTF-8。
-// 对照组：R13+ 同字节直读不转换；未知码页保持字节直读。
+// 同一码页规则覆盖 R13–R2004；R2007+ 是 UTF-8，保持字节直读；未知码页
+// 同样保持字节直读。
 func TestParseDXFR12CodepageGBK(t *testing.T) {
 	gbkText := string([]byte{0xD6, 0xD0, 0xCE, 0xC4}) // "中文" GBK
 	entities := "  0\nTEXT\n  5\nFF\n  8\n0\n 10\n0.0\n 20\n0.0\n 30\n0.0\n 40\n1.0\n  1\n" + gbkText + "\n"
@@ -2545,10 +2546,15 @@ func TestParseDXFR12CodepageGBK(t *testing.T) {
 	if doc.Version() != "AC1009" {
 		t.Errorf("版本不符: %s", doc.Version())
 	}
-	// R13+ 同字节：码页不应用，字节直读（不产生 中文）
+	// R13–R2004 同字节：同样按声明码页解码
 	doc13 := mkDoc("  9\n$ACADVER\n  1\nAC1015\n  9\n$DWGCODEPAGE\n  3\nANSI_936\n")
-	if got := textOf(doc13); got == "中文" {
-		t.Errorf("R13+ 不应应用码页: %q", got)
+	if got := textOf(doc13); got != "中文" {
+		t.Errorf("R2000 GBK 解码不符: %q（期望 中文）", got)
+	}
+	// R2007+ 是 UTF-8：码页不应用，字节直读（不产生 中文）
+	doc07 := mkDoc("  9\n$ACADVER\n  1\nAC1021\n  9\n$DWGCODEPAGE\n  3\nANSI_936\n")
+	if got := textOf(doc07); got == "中文" {
+		t.Errorf("R2007+ 不应应用码页: %q", got)
 	}
 	// R12 无 $DWGCODEPAGE：缺省 30（Latin-1 近似），不解出 中文
 	docDef := mkDoc("  9\n$ACADVER\n  1\nAC1009\n")

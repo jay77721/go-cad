@@ -23,10 +23,13 @@ func TestFontChainProbeCoverage(t *testing.T) {
 	if tr.basic {
 		t.Skip("无 opentype 系统字体，跳过字体链覆盖门禁")
 	}
+	sf := tr.face(24)
+	if g := tr.glyph('中', sf); g == nil || g.mask == nil {
+		t.Skip("无 CJK 系统字体，跳过字体链覆盖门禁")
+	}
 	if len(tr.fallbacks) == 0 {
 		t.Log("提示：无后备字体（单字体环境），仅验证主字体覆盖")
 	}
-	sf := tr.face(24)
 	missing := 0
 	for _, r := range fontChainProbeChars {
 		g := tr.glyph(r, sf)

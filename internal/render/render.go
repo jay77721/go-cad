@@ -20,6 +20,10 @@ type RenderOptions struct {
 	Width      int        // 输出宽度像素，默认 2048；高度按包围盒比例确定
 	Background color.RGBA // 背景色，默认白色
 	FontPath   string     // 字形渲染字体文件路径（空=自动探测系统字体；无可用字体回退占位条）
+	// Box 可选世界坐标视口 {minX, minY, maxX, maxY}；nil 时按文本感知的
+	// 稳健包围盒自动选择。调用方（如 RAGFlow 的 CAD 预览/裁图）可用它
+	// 指定图面区域，避免兜底视口选到远离文字的几何簇。
+	Box *[4]float64
 }
 
 // RenderPNG 将文档模型空间渲染为 PNG 字节流。
@@ -42,8 +46,10 @@ func RenderPNG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 
 	// 2. 稳健包围盒：分位窗口 + 主分量收紧（quantileSheetBounds，与
 	// DetectSheets 兜底口径一致）——「中位数±3×p90」在主体图元+远处
-	// 标注簇的双峰分布下会把视口撑大数倍，主体内容被稀释成中部一条
-	bbox := quantileSheetBounds(prims)
+	// 标注簇的双峰分布下会把视口撑大数倍，主体内容被稀释成中部一条。
+	// 文本感知兜底：密度簇选到远离文字时改用文字簇；调用方也可用
+	// RenderOptions.Box 直接指定视口。
+	bbox := resolveRenderBounds(prims, opts.Box)
 	if bbox.Invalid() {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 	}

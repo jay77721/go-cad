@@ -64,8 +64,9 @@ func RenderSVG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	prim.Budget = svgExpandBudget
 	prims := prim.ExpandAll()
 	prims = filterRadiatingStrokes(prims)
-	// 与 RenderPNG 同口径：分位窗口 + 主分量收紧，双峰分布不再撑大视口
-	bbox := quantileSheetBounds(prims)
+	// 与 RenderPNG 同口径：分位窗口 + 主分量收紧，双峰分布不再撑大视口；
+	// 文本感知兜底与 RenderOptions.Box 覆盖同 PNG 路径。
+	bbox := resolveRenderBounds(prims, opts.Box)
 	if bbox.Invalid() {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 	}

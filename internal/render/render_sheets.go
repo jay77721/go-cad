@@ -52,11 +52,12 @@ type Sheet struct {
 
 // SheetResult 批量渲染的单张结果。
 type SheetResult struct {
-	Name      string  // 图名（与 Sheet.Name 一致）
-	Data      []byte  // 图片字节流（PNG 或 SVG，由 format 决定）
-	Width     int     // 最终渲染宽度像素（PNG 为实际画布宽；SVG 为名义宽）
-	PassRate  float64 // 文字清晰达标率：框内全部文本像素高 ≥8px 的占比（0~1）；SVG 等未统计时为 -1
-	Rerenders int     // 清晰度自检触发的自动重渲次数（0=一次成型；SVG 恒为 0）
+	Name      string     // 图名（与 Sheet.Name 一致）
+	Data      []byte     // 图片字节流（PNG 或 SVG，由 format 决定）
+	Width     int        // 最终渲染宽度像素（PNG 为实际画布宽；SVG 为名义宽）
+	Viewport  [4]float64 // 世界坐标视口 {minX,minY,maxX,maxY}（含 2% 边距）
+	PassRate  float64    // 文字清晰达标率：框内全部文本像素高 ≥8px 的占比（0~1）；SVG 等未统计时为 -1
+	Rerenders int        // 清晰度自检触发的自动重渲次数（0=一次成型；SVG 恒为 0）
 }
 
 // sheetStdout 清晰度告警/重渲说明的输出流：默认进程 stdout（CLI 出图
@@ -875,7 +876,7 @@ func (sd *sheetDetector) blockName(h uint64) string {
 func (sd *sheetDetector) fallbackWhole() []Sheet {
 	prim := drawing.NewTessellator(sd.doc)
 	prims := prim.ExpandAll()
-	bbox := quantileSheetBounds(prims)
+	bbox := sheetContentBounds(prims)
 	if bbox.Invalid() {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 	}
@@ -1450,6 +1451,193 @@ func principalRange(sorted []float64, lo, hi float64) (float64, float64) {
 	return bestLo, bestHi
 }
 
+// ---- 文本感知的兜底视口 ----
+
+// textMark 一个可渲染文本的插入点与字高。
+type textMark struct {
+	x, y, h float64
+}
+
+// textMarks 收集可渲染文本的插入点；非法坐标跳过。
+func textMarks(prims []drawing.Primitive) []textMark {
+	marks := make([]textMark, 0, len(prims)/4)
+	for i := range prims {
+		p := &prims[i]
+		if p.Kind != 1 || p.Lb.Tx == nil || !drawing.Plausible(p.Lb.X, p.Lb.Y) {
+			continue
+		}
+		marks = append(marks, textMark{
+			x: p.Lb.X,
+			y: p.Lb.Y,
+			h: math.Hypot(p.Lb.Tx.Ux, p.Lb.Tx.Uy) * p.Lb.Tx.HWorld,
+		})
+	}
+	return marks
+}
+
+// marksBounds 插入点包围盒，按最大字高外扩一圈，避免裁掉字形。
+func marksBounds(marks []textMark) drawing.Box2 {
+	minX, minY, maxX, maxY := marks[0].x, marks[0].y, marks[0].x, marks[0].y
+	maxH := 0.0
+	for _, m := range marks {
+		minX = math.Min(minX, m.x)
+		minY = math.Min(minY, m.y)
+		maxX = math.Max(maxX, m.x)
+		maxY = math.Max(maxY, m.y)
+		maxH = math.Max(maxH, m.h)
+	}
+	if maxH > 0 {
+		minX -= maxH
+		minY -= maxH
+		maxX += maxH
+		maxY += maxH
+	}
+	return drawing.Box2{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}
+}
+
+// boxDistance 点到框的欧氏距离；框内为 0。
+func boxDistance(x, y float64, b drawing.Box2) float64 {
+	var dx, dy float64
+	if x < b.MinX {
+		dx = b.MinX - x
+	} else if x > b.MaxX {
+		dx = x - b.MaxX
+	}
+	if y < b.MinY {
+		dy = b.MinY - y
+	} else if y > b.MaxY {
+		dy = y - b.MaxY
+	}
+	return math.Hypot(dx, dy)
+}
+
+// expandBox 按跨度比例外扩；零尺寸退化时给 1 个世界单位边距。
+func expandBox(b drawing.Box2, ratio float64) drawing.Box2 {
+	padX := (b.MaxX - b.MinX) * ratio
+	padY := (b.MaxY - b.MinY) * ratio
+	if padX == 0 && padY == 0 {
+		padX, padY = 1, 1
+	}
+	return drawing.Box2{MinX: b.MinX - padX, MinY: b.MinY - padY, MaxX: b.MaxX + padX, MaxY: b.MaxY + padY}
+}
+
+// unionBoxPoint 把点并入包围盒。
+func unionBoxPoint(b drawing.Box2, x, y float64) drawing.Box2 {
+	b.MinX = math.Min(b.MinX, x)
+	b.MinY = math.Min(b.MinY, y)
+	b.MaxX = math.Max(b.MaxX, x)
+	b.MaxY = math.Max(b.MaxY, y)
+	return b
+}
+
+// textClusterBounds 以文本包围盒为种子，并入端点落在附近的几何描边，
+// 得到文字所在的内容簇。只收端点命中的描边，避免一条横贯全图的网格线
+// 把远处几何簇重新拉回视口。
+func textClusterBounds(prims []drawing.Primitive, tb drawing.Box2) (drawing.Box2, bool) {
+	span := math.Max(tb.MaxX-tb.MinX, tb.MaxY-tb.MinY)
+	pad := span * 0.05
+	if pad <= 0 {
+		pad = 1
+	}
+	probe := drawing.Box2{MinX: tb.MinX - pad, MinY: tb.MinY - pad, MaxX: tb.MaxX + pad, MaxY: tb.MaxY + pad}
+	out := tb
+	found := false
+	for i := range prims {
+		p := &prims[i]
+		if p.Kind != 0 {
+			continue
+		}
+		for _, s := range p.Strokes {
+			if !pointInBox(s.X1, s.Y1, probe) && !pointInBox(s.X2, s.Y2, probe) {
+				continue
+			}
+			out = unionBoxPoint(out, s.X1, s.Y1)
+			out = unionBoxPoint(out, s.X2, s.Y2)
+			found = true
+		}
+	}
+	return out, found
+}
+
+// sheetContentBounds 兜底整图的稳健包围盒：
+//   - 分位/主分量框已覆盖大部分文本时保持原口径（边缘字形微出框不算错）；
+//   - 文本大部分落在框外时，改用文字所在的内容簇；
+//   - 远离几何框超过 10 倍跨度的文本视为错位/离群标注，不参与决策，
+//     否则单个天文坐标文本会把视口拉到整张图之外。
+func sheetContentBounds(prims []drawing.Primitive) drawing.Box2 {
+	b := quantileSheetBounds(prims)
+	marks := textMarks(prims)
+	if len(marks) == 0 {
+		return b
+	}
+	span := math.Max(b.MaxX-b.MinX, b.MaxY-b.MinY)
+	if span <= 0 {
+		span = 1
+	}
+	limit := span * 10
+	relevant := make([]textMark, 0, len(marks))
+	for _, m := range marks {
+		if boxDistance(m.x, m.y, b) <= limit {
+			relevant = append(relevant, m)
+		}
+	}
+	if len(relevant) == 0 {
+		return b
+	}
+	probe := expandBox(b, 0.05)
+	inside := 0
+	for _, m := range relevant {
+		if pointInBox(m.x, m.y, probe) {
+			inside++
+		}
+	}
+	// 只要框内仍有文本就保持原口径：部分标注出框属于取景取舍，调用方
+	// 可用 RenderOptions.Box 指定精确视口；完全框不住文本（0 条）才是
+	// 密度簇选错簇的硬缺陷，必须切到文字簇。
+	if inside > 0 {
+		return b
+	}
+	tb := marksBounds(relevant)
+	if cluster, found := textClusterBounds(prims, tb); found {
+		return cluster
+	}
+	return tb
+}
+
+// hasTextPrimitive 文档是否带可渲染文本。
+func hasTextPrimitive(prims []drawing.Primitive) bool {
+	for i := range prims {
+		p := &prims[i]
+		if p.Kind == 1 && p.Lb.Tx != nil && drawing.Plausible(p.Lb.X, p.Lb.Y) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTextInBox 视口内是否有可渲染文本。
+func hasTextInBox(prims []drawing.Primitive, b drawing.Box2) bool {
+	for i := range prims {
+		p := &prims[i]
+		if p.Kind == 1 && p.Lb.Tx != nil && drawing.Plausible(p.Lb.X, p.Lb.Y) && pointInBox(p.Lb.X, p.Lb.Y, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveRenderBounds 解析整图渲染视口：显式 Box 优先，否则走文本感知的
+// 稳健包围盒。Box 退化（零宽/零高）时回退自动口径。
+func resolveRenderBounds(prims []drawing.Primitive, box *[4]float64) drawing.Box2 {
+	if box != nil {
+		b := drawing.Box2{MinX: box[0], MinY: box[1], MaxX: box[2], MaxY: box[3]}
+		if !b.Invalid() && b.MaxX > b.MinX && b.MaxY > b.MinY {
+			return b
+		}
+	}
+	return sheetContentBounds(prims)
+}
+
 // ---- 逐张渲染 ----
 
 // sheetViewport 图框包围盒 → 渲染视口：外扩 sheetViewportMargin 边距，
@@ -1466,6 +1654,13 @@ func sheetViewport(b [4]float64) drawing.Box2 {
 		marginY = marginX
 	}
 	return drawing.Box2{MinX: bb.MinX - marginX, MinY: bb.MinY - marginY, MaxX: bb.MaxX + marginX, MaxY: bb.MaxY + marginY}
+}
+
+// SheetViewport 返回图框 Box 对应的世界坐标视口（含 sheetViewportMargin
+// 边距）。调用方需要把文本/实体 bbox 映射到渲染像素时使用同一口径。
+func SheetViewport(b [4]float64) [4]float64 {
+	vp := sheetViewport(b)
+	return [4]float64{vp.MinX, vp.MinY, vp.MaxX, vp.MaxY}
 }
 
 // sheetPipeline 图框切分渲染的共享素材：整图展开与全局过滤一次完成，
@@ -1580,6 +1775,14 @@ func (sp *sheetPipeline) renderPNG(sheet Sheet, opts RenderOptions) ([]byte, int
 	if opts.Width > 0 {
 		return data, width, rate, rerenders, nil
 	}
+	// 视口内没有任何文本（但文档本身有文本）时，放大宽度不会把文字拉回
+	// 视口，只会白白重渲；保留首张并告警，视口错误交给调用方修。
+	if !hasTextInBox(sp.prims, vp) && hasTextPrimitive(sp.prims) {
+		fmt.Fprintf(sheetStdout,
+			"cad: 警告 图框 %q 视口内没有文本（文档含文本），跳过清晰度重渲；请检查视口或 RenderOptions.Box\n",
+			sheet.Name)
+		return data, width, rate, rerenders, nil
+	}
 	for rate < sheetPassRateMin && width < sheetHardMaxWidth {
 		next := width * 2
 		if !sheetPixelsOK(vp, next) {
@@ -1652,6 +1855,12 @@ func sheetTextPassRate(prims []drawing.Primitive, vp drawing.Box2, scale float64
 		}
 	}
 	if total == 0 {
+		// 框内没有文本有两种情况：文档本来没有文本（达标），或视口选错、
+		// 文本全部落在框外（不达标）。后者必须暴露给重渲/调用方，否则
+		//「0 条文本」会被当成 100% 清晰度，错误视口永远不会被发现。
+		if hasTextPrimitive(prims) {
+			return 0
+		}
 		return 1
 	}
 	return float64(ok) / float64(total)
@@ -1786,7 +1995,7 @@ func RenderAllSheets(doc *drawing.Document, opts RenderOptions, format string) (
 	sheets := DetectSheets(doc)
 	sp := prepareSheets(doc)
 	if len(sheets) != 1 || sheets[0].Name != "整图" {
-		if b := quantileSheetBounds(sp.prims); !b.Invalid() {
+		if b := sheetContentBounds(sp.prims); !b.Invalid() {
 			sheets = append([]Sheet{{Name: "整图全览", Box: [4]float64{b.MinX, b.MinY, b.MaxX, b.MaxY}}}, sheets...)
 		}
 	}
@@ -1814,7 +2023,7 @@ func RenderAllSheets(doc *drawing.Document, opts RenderOptions, format string) (
 		if err != nil {
 			return nil, fmt.Errorf("cad: 渲染图框 %q: %w", s.Name, err)
 		}
-		results = append(results, SheetResult{Name: s.Name, Data: data, Width: width, PassRate: rate, Rerenders: rerenders})
+		results = append(results, SheetResult{Name: s.Name, Data: data, Width: width, Viewport: SheetViewport(s.Box), PassRate: rate, Rerenders: rerenders})
 	}
 	return results, nil
 }
